@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 import { findSimilarContent } from '@/utils/semanticAnalysis';
+import { useToast } from '@/hooks/use-toast';
 
 export const NotesValidator = () => {
   const [notes, setNotes] = useState('');
@@ -13,6 +14,7 @@ export const NotesValidator = () => {
     complete: boolean;
     missingElements: string[];
   }>(null);
+  const { toast } = useToast();
 
   const requiredElements = [
     "Chief complaint",
@@ -26,6 +28,8 @@ export const NotesValidator = () => {
 
   const analyzeNotes = async () => {
     setIsAnalyzing(true);
+    setAnalysis(null);
+    
     try {
       const missingElements = [];
       
@@ -40,8 +44,27 @@ export const NotesValidator = () => {
         complete: missingElements.length === 0,
         missingElements
       });
+      
+      if (missingElements.length === 0) {
+        toast({
+          title: "Analysis Complete",
+          description: "Notes contain all required information!",
+          variant: "default",
+        });
+      } else {
+        toast({
+          title: "Missing Information",
+          description: `${missingElements.length} required elements are missing.`,
+          variant: "destructive",
+        });
+      }
     } catch (error) {
       console.error('Analysis error:', error);
+      toast({
+        title: "Analysis Error",
+        description: "An error occurred while analyzing notes. Using fallback method.",
+        variant: "destructive",
+      });
     } finally {
       setIsAnalyzing(false);
     }
