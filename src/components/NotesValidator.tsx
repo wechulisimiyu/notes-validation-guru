@@ -13,6 +13,7 @@ export const NotesValidator = () => {
   const [analysis, setAnalysis] = useState<null | {
     complete: boolean;
     missingElements: string[];
+    detectedElements: string[];
   }>(null);
   const { toast } = useToast();
 
@@ -32,17 +33,21 @@ export const NotesValidator = () => {
     
     try {
       const missingElements = [];
+      const detectedElements = [];
       
       for (const element of requiredElements) {
         const hasContent = await findSimilarContent(notes, element);
-        if (!hasContent) {
+        if (hasContent) {
+          detectedElements.push(element);
+        } else {
           missingElements.push(element);
         }
       }
 
       setAnalysis({
         complete: missingElements.length === 0,
-        missingElements
+        missingElements,
+        detectedElements
       });
       
       if (missingElements.length === 0) {
@@ -133,6 +138,24 @@ export const NotesValidator = () => {
                   </div>
                 )}
               </div>
+
+              {analysis.detectedElements.length > 0 && (
+                <div className="mb-4">
+                  <h3 className="text-sm font-medium text-gray-700 mb-2">
+                    Detected Information:
+                  </h3>
+                  <ul className="space-y-1">
+                    {analysis.detectedElements.map((element, index) => (
+                      <li 
+                        key={index}
+                        className="text-sm text-green-600"
+                      >
+                        • {element}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               
               {!analysis.complete && (
                 <div>
@@ -158,3 +181,4 @@ export const NotesValidator = () => {
     </div>
   );
 };
+
