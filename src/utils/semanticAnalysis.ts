@@ -1,6 +1,4 @@
-
 import { pipeline } from '@huggingface/transformers';
-import { useToast } from '@/hooks/use-toast';
 
 let embeddingModel: any = null;
 let modelLoadAttempted = false;
@@ -27,14 +25,12 @@ export const computeEmbedding = async (text: string) => {
   try {
     const model = await initializeModel();
     if (!model) {
-      // Return a placeholder embedding if model failed to load
       return Array(384).fill(0).map(() => Math.random() * 2 - 1);
     }
     const embedding = await model(text, { pooling: 'mean', normalize: true });
     return embedding.tolist()[0];
   } catch (error) {
     console.error('Error computing embedding:', error);
-    // Return a random embedding as fallback
     return Array(384).fill(0).map(() => Math.random() * 2 - 1);
   }
 };
@@ -46,33 +42,88 @@ export const cosineSimilarity = (a: number[], b: number[]): number => {
   return dotProduct / (normA * normB);
 };
 
-// Simple fallback for semantic similarity when model isn't available
 const containsKeywords = (text: string, element: string): boolean => {
   const keywords = element.toLowerCase().split(' ');
   const textLower = text.toLowerCase();
   
-  // Check if at least half of the keywords are present
   const matchCount = keywords.filter(word => textLower.includes(word)).length;
   return matchCount >= Math.ceil(keywords.length / 2);
+};
+
+const medicalContexts = {
+  "Chief complaint": {
+    patterns: ["presents with", "complains of", "came in for", "reports", "experiencing"],
+    contextClues: ["symptoms", "since", "started", "ago"]
+  },
+  "History of present illness": {
+    patterns: ["started", "began", "developed", "progression", "course"],
+    contextClues: ["days ago", "weeks ago", "gradually", "suddenly", "previously"]
+  },
+  "Past medical history": {
+    patterns: ["history of", "diagnosed with", "previous", "chronic", "known"],
+    contextClues: ["condition", "surgery", "treatment", "managed with"]
+  },
+  "Current medications": {
+    patterns: ["taking", "prescribed", "medications include", "daily", "current medications"],
+    contextClues: ["mg", "dose", "tablet", "capsule"]
+  },
+  "Allergies": {
+    patterns: ["allergic to", "allergies", "reactions", "sensitivity"],
+    contextClues: ["medication allergy", "food allergy", "NKDA", "intolerance"]
+  },
+  "Physical examination findings": {
+    patterns: ["examination reveals", "observed", "auscultation", "palpation"],
+    contextClues: ["normal", "present", "absent", "bilateral"]
+  },
+  "Vital signs": {
+    patterns: ["BP", "HR", "RR", "temperature", "SpO2"],
+    contextClues: ["mmHg", "bpm", "/min", "degrees", "%"]
+  }
+};
+
+const findContextualMatch = (text: string, section: string): boolean => {
+  const context = medicalContexts[section as keyof typeof medicalContexts];
+  if (!context) return false;
+
+  const textLower = text.toLowerCase();
+  
+  const hasPattern = context.patterns.some(pattern => 
+    textLower.includes(pattern.toLowerCase())
+  );
+  
+  const hasContextClues = context.contextClues.some(clue => 
+    textLower.includes(clue.toLowerCase())
+  );
+
+  if (section === "Vital signs") {
+    const hasNumericValues = /\d+/.test(textLower) && 
+      (textLower.includes("bp") || textLower.includes("hr") || 
+       textLower.includes("temp") || textLower.includes("rr"));
+    return hasNumericValues || (hasPattern && hasContextClues);
+  }
+
+  return hasPattern || (hasContextClues && textLower.length > 50);
 };
 
 export const findSimilarContent = async (notes: string, requiredElement: string) => {
   try {
     const model = await initializeModel();
     
-    // If model failed to load, use keyword matching as fallback
-    if (!model) {
-      return containsKeywords(notes, requiredElement);
+    const hasContextMatch = findContextualMatch(notes, requiredElement);
+    if (hasContextMatch) return true;
+    
+    if (model) {
+      const notesEmbedding = await computeEmbedding(notes);
+      const elementEmbedding = await computeEmbedding(requiredElement);
+      
+      const similarity = cosineSimilarity(notesEmbedding, elementEmbedding);
+      return similarity > 0.5;
     }
     
-    const notesEmbedding = await computeEmbedding(notes);
-    const elementEmbedding = await computeEmbedding(requiredElement);
-    
-    const similarity = cosineSimilarity(notesEmbedding, elementEmbedding);
-    return similarity > 0.6; // Threshold for similarity
+    return containsKeywords(notes, requiredElement);
   } catch (error) {
     console.error('Error in findSimilarContent:', error);
-    // Fall back to simple keyword matching
-    return containsKeywords(notes, requiredElement);
+    return findContextualMatch(notes, requiredElement) || 
+           containsKeywords(notes, requiredElement);
   }
 };
