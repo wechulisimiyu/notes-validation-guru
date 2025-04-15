@@ -1,44 +1,53 @@
-
-import React, { useState } from 'react';
-import { Textarea } from '@/components/ui/textarea';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
-import { AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
-import { findSimilarContent } from '@/utils/semanticAnalysis';
-import { useToast } from '@/hooks/use-toast';
+import React, { useState } from "react";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
+import { findSimilarContent, findMatchingText } from "@/utils/semanticAnalysis";
+import { useToast } from "@/hooks/use-toast";
 
 export const NotesValidator = () => {
-  const [notes, setNotes] = useState('');
+  const [notes, setNotes] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<null | {
     complete: boolean;
     missingElements: string[];
     detectedElements: string[];
+    detectedText: Record<string, string>;
   }>(null);
   const { toast } = useToast();
 
-  const requiredElements = [
-    "Chief complaint",
-    "History of present illness",
-    "Past medical history",
-    "Current medications",
-    "Allergies",
-    "Physical examination findings",
-    "Vital signs"
-  ];
+  // Updated structure with descriptions
+  const requiredElementsWithDescriptions: Record<string, string> = {
+    "Chief complaint": "The patient's primary reason for seeking medical care",
+    "History of present illness":
+      "Chronological description of the patient's symptoms",
+    "Past medical history": "Previous diagnoses, hospitalizations, surgeries",
+    "Current medications": "All medications the patient is currently taking",
+    Allergies:
+      "Known allergies to medications, foods, or environmental factors",
+    "Physical examination findings":
+      "Results of the practitioner's examination",
+    "Vital signs": "Temperature, blood pressure, pulse, respiratory rate, etc.",
+  };
+
+  const requiredElements = Object.keys(requiredElementsWithDescriptions);
 
   const analyzeNotes = async () => {
     setIsAnalyzing(true);
     setAnalysis(null);
-    
+
     try {
       const missingElements = [];
       const detectedElements = [];
-      
+      const detectedText: Record<string, string> = {};
+
       for (const element of requiredElements) {
-        const hasContent = await findSimilarContent(notes, element);
+        const { hasContent, matchedText } = await findMatchingText(notes, element);
+        
         if (hasContent) {
           detectedElements.push(element);
+          detectedText[element] = matchedText || "Detected (no specific text extracted)";
         } else {
           missingElements.push(element);
         }
@@ -47,9 +56,10 @@ export const NotesValidator = () => {
       setAnalysis({
         complete: missingElements.length === 0,
         missingElements,
-        detectedElements
+        detectedElements,
+        detectedText,
       });
-      
+
       if (missingElements.length === 0) {
         toast({
           title: "Analysis Complete",
@@ -64,10 +74,11 @@ export const NotesValidator = () => {
         });
       }
     } catch (error) {
-      console.error('Analysis error:', error);
+      console.error("Analysis error:", error);
       toast({
         title: "Analysis Error",
-        description: "An error occurred while analyzing notes. Using fallback method.",
+        description:
+          "An error occurred while analyzing notes. Using fallback method.",
         variant: "destructive",
       });
     } finally {
@@ -80,7 +91,7 @@ export const NotesValidator = () => {
       <h1 className="text-2xl font-semibold text-gray-900 mb-6">
         Clinical Notes Validation
       </h1>
-      
+
       <div className="grid gap-6 md:grid-cols-2">
         <Card className="p-6">
           <h2 className="text-lg font-medium mb-4">Practitioner Notes</h2>
@@ -90,7 +101,7 @@ export const NotesValidator = () => {
             placeholder="Enter clinical notes here..."
             className="min-h-[300px] mb-4"
           />
-          <Button 
+          <Button
             onClick={analyzeNotes}
             className="w-full"
             disabled={isAnalyzing || !notes.trim()}
@@ -101,7 +112,7 @@ export const NotesValidator = () => {
                 Analyzing...
               </>
             ) : (
-              'Analyze Notes'
+              "Analyze Notes"
             )}
           </Button>
         </Card>
@@ -111,12 +122,14 @@ export const NotesValidator = () => {
             <h2 className="text-lg font-medium mb-4">Required Information</h2>
             <ul className="space-y-2">
               {requiredElements.map((element, index) => (
-                <li 
-                  key={index}
-                  className="flex items-center text-gray-700"
-                >
-                  <div className="w-2 h-2 bg-blue-600 rounded-full mr-2" />
-                  {element}
+                <li key={index} className="flex text-gray-700">
+                  <div className="w-2 h-2 bg-blue-600 rounded-full mr-2 mt-2 flex-shrink-0" />
+                  <div>
+                    <span className="font-medium">{element}</span>
+                    <p className="text-sm text-gray-500">
+                      {requiredElementsWithDescriptions[element]}
+                    </p>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -144,19 +157,24 @@ export const NotesValidator = () => {
                   <h3 className="text-sm font-medium text-gray-700 mb-2">
                     Detected Information:
                   </h3>
-                  <ul className="space-y-1">
+                  <ul className="space-y-3">
                     {analysis.detectedElements.map((element, index) => (
-                      <li 
-                        key={index}
-                        className="text-sm text-green-600"
-                      >
-                        • {element}
+                      <li key={index} className="text-sm">
+                        <div className="flex items-start">
+                          <CheckCircle2 className="w-4 h-4 text-green-600 mr-2 mt-0.5" />
+                          <div>
+                            <span className="font-medium text-green-700">{element}</span>
+                            <p className="text-gray-700 mt-1 p-2 bg-gray-50 rounded-md text-xs border border-gray-200">
+                              {analysis.detectedText[element]}
+                            </p>
+                          </div>
+                        </div>
                       </li>
                     ))}
                   </ul>
                 </div>
               )}
-              
+
               {!analysis.complete && (
                 <div>
                   <h3 className="text-sm font-medium text-gray-700 mb-2">
@@ -164,11 +182,16 @@ export const NotesValidator = () => {
                   </h3>
                   <ul className="space-y-1">
                     {analysis.missingElements.map((element, index) => (
-                      <li 
-                        key={index}
-                        className="text-sm text-red-600"
-                      >
-                        • {element}
+                      <li key={index} className="text-sm">
+                        <div className="flex items-start">
+                          <AlertCircle className="w-4 h-4 text-red-600 mr-2 mt-0.5" />
+                          <div>
+                            <span className="font-medium text-red-700">{element}</span>
+                            <p className="text-gray-500 text-xs">
+                              {requiredElementsWithDescriptions[element]}
+                            </p>
+                          </div>
+                        </div>
                       </li>
                     ))}
                   </ul>
@@ -181,4 +204,3 @@ export const NotesValidator = () => {
     </div>
   );
 };
-
