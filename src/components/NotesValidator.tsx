@@ -3,10 +3,12 @@ import React, { useState } from 'react';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { AlertCircle, CheckCircle2 } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
+import { findSimilarContent } from '@/utils/semanticAnalysis';
 
 export const NotesValidator = () => {
   const [notes, setNotes] = useState('');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<null | {
     complete: boolean;
     missingElements: string[];
@@ -22,15 +24,27 @@ export const NotesValidator = () => {
     "Vital signs"
   ];
 
-  const analyzeNotes = () => {
-    const missingElements = requiredElements.filter(element => 
-      !notes.toLowerCase().includes(element.toLowerCase())
-    );
+  const analyzeNotes = async () => {
+    setIsAnalyzing(true);
+    try {
+      const missingElements = [];
+      
+      for (const element of requiredElements) {
+        const hasContent = await findSimilarContent(notes, element);
+        if (!hasContent) {
+          missingElements.push(element);
+        }
+      }
 
-    setAnalysis({
-      complete: missingElements.length === 0,
-      missingElements
-    });
+      setAnalysis({
+        complete: missingElements.length === 0,
+        missingElements
+      });
+    } catch (error) {
+      console.error('Analysis error:', error);
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   return (
@@ -50,9 +64,17 @@ export const NotesValidator = () => {
           />
           <Button 
             onClick={analyzeNotes}
-            className="w-full bg-blue-600 hover:bg-blue-700"
+            className="w-full"
+            disabled={isAnalyzing || !notes.trim()}
           >
-            Analyze Notes
+            {isAnalyzing ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Analyzing...
+              </>
+            ) : (
+              'Analyze Notes'
+            )}
           </Button>
         </Card>
 
