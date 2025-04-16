@@ -3,7 +3,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
-import { findSimilarContent, findMatchingText } from "@/utils/semanticAnalysis";
+import { analyzeMedicalText } from "@/utils/semanticAnalysis";
 import { useToast } from "@/hooks/use-toast";
 
 export const NotesValidator = () => {
@@ -43,7 +43,7 @@ export const NotesValidator = () => {
       const detectedText: Record<string, string> = {};
 
       for (const element of requiredElements) {
-        const { hasContent, matchedText } = await findMatchingText(notes, element);
+        const { hasContent, matchedText } = await analyzeMedicalText(notes, element);
         
         if (hasContent) {
           detectedElements.push(element);

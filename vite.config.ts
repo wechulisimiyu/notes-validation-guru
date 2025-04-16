@@ -19,4 +19,8 @@ export default defineConfig(({ mode }) => ({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  // Define environment variables that should be exposed to the client
+  define: {
+    'process.env.GROQ_API_KEY': JSON.stringify(process.env.GROQ_API_KEY),
+  },
 }));

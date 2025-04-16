@@ -1,49 +1,91 @@
-import { pipeline } from "@huggingface/transformers";
+import { Groq } from "groq-sdk";
 
-let embeddingModel: any = null;
+let groqClient: Groq | null = null;
 let modelLoadAttempted = false;
 
-export const initializeModel = async () => {
-  if (!embeddingModel && !modelLoadAttempted) {
+export const initializeGroqClient = async () => {
+  if (!groqClient && !modelLoadAttempted) {
     try {
       modelLoadAttempted = true;
-      embeddingModel = await pipeline(
-        "feature-extraction",
-        "mixedbread-ai/mxbai-embed-xsmall-v1",
-        { device: "wasm" } // Use WebAssembly instead of CPU
-      );
-      return embeddingModel;
+      const apiKey = process.env.GROQ_API_KEY || "";
+
+      if (!apiKey) {
+        console.warn("GROQ_API_KEY not found in environment variables");
+        return null;
+      }
+
+      groqClient = new Groq({ apiKey });
+      return groqClient;
     } catch (error) {
-      console.error("Failed to load embedding model:", error);
+      console.error("Failed to initialize Groq client:", error);
       return null;
     }
   }
-  return embeddingModel;
+  return groqClient;
 };
 
-export const computeEmbedding = async (text: string) => {
+export const analyzeMedicalText = async (
+  notes: string,
+  requiredElement: string
+): Promise<{ hasContent: boolean; matchedText: string | null }> => {
   try {
-    const model = await initializeModel();
-    if (!model) {
-      return Array(384)
-        .fill(0)
-        .map(() => Math.random() * 2 - 1);
+    const client = await initializeGroqClient();
+    if (!client) {
+      return fallbackAnalysis(notes, requiredElement);
     }
-    const embedding = await model(text, { pooling: "mean", normalize: true });
-    return embedding.tolist()[0];
+
+    const prompt = `
+    You are an AI assistant helping to analyze medical notes. 
+    Extract information related to "${requiredElement}" from the following clinical notes.
+    If the information is present, respond with "YES: [extracted text]"
+    If the information is missing, respond with "NO"
+    
+    Clinical notes:
+    ${notes}
+    `;
+
+    const response = await client.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a specialized medical text analyzer. Answer with just YES or NO followed by the extracted content.",
+        },
+        { role: "user", content: prompt },
+      ],
+      max_tokens: 300,
+      temperature: 0.1,
+    });
+
+    const answer = response.choices[0]?.message?.content || "";
+
+    if (answer.startsWith("YES:")) {
+      const extractedText = answer.substring(4).trim();
+      return { hasContent: true, matchedText: extractedText };
+    } else {
+      return { hasContent: false, matchedText: null };
+    }
   } catch (error) {
-    console.error("Error computing embedding:", error);
-    return Array(384)
-      .fill(0)
-      .map(() => Math.random() * 2 - 1);
+    console.error("Error using Groq API:", error);
+    return fallbackAnalysis(notes, requiredElement);
   }
 };
 
-export const cosineSimilarity = (a: number[], b: number[]): number => {
-  const dotProduct = a.reduce((sum, val, i) => sum + val * b[i], 0);
-  const normA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0));
-  const normB = Math.sqrt(b.reduce((sum, val) => sum + val * val, 0));
-  return dotProduct / (normA * normB);
+const fallbackAnalysis = (
+  notes: string,
+  requiredElement: string
+): { hasContent: boolean; matchedText: string | null } => {
+  const hasMatch =
+    findContextualMatch(notes, requiredElement) ||
+    containsKeywords(notes, requiredElement);
+
+  if (hasMatch) {
+    const textSnippet = extractTextSnippet(notes, requiredElement);
+    return { hasContent: true, matchedText: textSnippet };
+  }
+
+  return { hasContent: false, matchedText: null };
 };
 
 const containsKeywords = (text: string, element: string): boolean => {
@@ -136,89 +178,6 @@ const findContextualMatch = (text: string, section: string): boolean => {
   return hasPattern || (hasContextClues && textLower.length > 50);
 };
 
-export const findSimilarContent = async (
-  notes: string,
-  requiredElement: string
-) => {
-  try {
-    const model = await initializeModel();
-
-    const hasContextMatch = findContextualMatch(notes, requiredElement);
-    if (hasContextMatch) return true;
-
-    if (model) {
-      const notesEmbedding = await computeEmbedding(notes);
-      const elementEmbedding = await computeEmbedding(requiredElement);
-
-      const similarity = cosineSimilarity(notesEmbedding, elementEmbedding);
-      return similarity > 0.5;
-    }
-
-    return containsKeywords(notes, requiredElement);
-  } catch (error) {
-    console.error("Error in findSimilarContent:", error);
-    return (
-      findContextualMatch(notes, requiredElement) ||
-      containsKeywords(notes, requiredElement)
-    );
-  }
-};
-
-export const findMatchingText = async (
-  notes: string,
-  requiredElement: string
-): Promise<{ hasContent: boolean; matchedText: string | null }> => {
-  try {
-    const model = await initializeModel();
-    const context =
-      medicalContexts[requiredElement as keyof typeof medicalContexts];
-
-    // First check if we have a contextual match
-    const hasContextMatch = findContextualMatch(notes, requiredElement);
-
-    if (hasContextMatch) {
-      // Try to extract the most relevant text snippet
-      const textSnippet = extractTextSnippet(notes, requiredElement);
-      return { hasContent: true, matchedText: textSnippet };
-    }
-
-    // If we have an embedding model, use semantic similarity
-    if (model) {
-      const notesEmbedding = await computeEmbedding(notes);
-      const elementEmbedding = await computeEmbedding(requiredElement);
-      const similarity = cosineSimilarity(notesEmbedding, elementEmbedding);
-
-      if (similarity > 0.5) {
-        const textSnippet = extractTextSnippet(notes, requiredElement);
-        return { hasContent: true, matchedText: textSnippet };
-      }
-    }
-
-    // Fall back to keyword matching
-    const keywordMatch = containsKeywords(notes, requiredElement);
-    if (keywordMatch) {
-      const textSnippet = extractTextSnippet(notes, requiredElement);
-      return { hasContent: true, matchedText: textSnippet };
-    }
-
-    return { hasContent: false, matchedText: null };
-  } catch (error) {
-    console.error("Error in findMatchingText:", error);
-    // Fallback methods if there's an error
-    const hasMatch =
-      findContextualMatch(notes, requiredElement) ||
-      containsKeywords(notes, requiredElement);
-
-    if (hasMatch) {
-      const textSnippet = extractTextSnippet(notes, requiredElement);
-      return { hasContent: true, matchedText: textSnippet };
-    }
-
-    return { hasContent: false, matchedText: null };
-  }
-};
-
-// Helper function to extract relevant text snippet based on patterns
 const extractTextSnippet = (notes: string, requiredElement: string): string => {
   const context =
     medicalContexts[requiredElement as keyof typeof medicalContexts];
@@ -227,7 +186,6 @@ const extractTextSnippet = (notes: string, requiredElement: string): string => {
   const sentences = notes.split(/[.!?]+/).filter((s) => s.trim().length > 0);
   const textLower = notes.toLowerCase();
 
-  // Look for sentences containing patterns or context clues
   const relevantSentences: string[] = [];
 
   for (const sentence of sentences) {
@@ -246,7 +204,6 @@ const extractTextSnippet = (notes: string, requiredElement: string): string => {
     }
   }
 
-  // Special handling for vital signs which might appear in a structured format
   if (requiredElement === "Vital signs") {
     const vitalSignRegex =
       /(?:BP|HR|RR|temp|temperature|pulse|respiration|SpO2|O2 sat)[:\s-]+\d+(?:[/.]?\d+)?(?:\s*(?:mmHg|bpm|%|°[CF]|C|F))?/gi;
@@ -257,17 +214,13 @@ const extractTextSnippet = (notes: string, requiredElement: string): string => {
     }
   }
 
-  // If we found relevant sentences, return them
   if (relevantSentences.length > 0) {
-    // If there are too many sentences, just return the first few
     if (relevantSentences.length > 3) {
       return relevantSentences.slice(0, 3).join(". ") + "...";
     }
     return relevantSentences.join(". ");
   }
 
-  // If no specific sentences were found but we know the content is there,
-  // try to extract the closest thing we can find to the element
   const keywords = requiredElement.toLowerCase().split(" ");
 
   for (const sentence of sentences) {
