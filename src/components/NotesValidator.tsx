@@ -87,23 +87,35 @@ export const NotesValidator = () => {
         "P": []
       };
 
+      // Process all required elements sequentially to ensure we make LLM calls for each
       for (const element of requiredElements) {
-        const { hasContent, matchedText, soapSection } = await analyzeMedicalText(
-          notes,
-          element
-        );
+        try {
+          const { hasContent, matchedText, soapSection } = await analyzeMedicalText(
+            notes,
+            element
+          );
 
-        // Use the soapSection from the analysis or fall back to our predefined mapping
-        const section = soapSection || elementToSoapSection[element] || "S";
+          // Use the soapSection from the analysis or fall back to our predefined mapping
+          const section = soapSection || elementToSoapSection[element] || "S";
 
-        if (hasContent) {
-          detectedElements.push(element);
-          detectedText[element] =
-            matchedText || "Detected (no specific text extracted)";
-          
-          // Add to the appropriate SOAP section
-          soapSections[section].push(element);
-        } else {
+          if (hasContent) {
+            detectedElements.push(element);
+            detectedText[element] =
+              matchedText || "Detected (no specific text extracted)";
+            
+            // Add to the appropriate SOAP section
+            soapSections[section].push(element);
+          } else {
+            missingElements.push(element);
+          }
+        } catch (elementError) {
+          console.error(`Error analyzing element ${element}:`, elementError);
+          toast({
+            title: "API Error",
+            description: `Error analyzing ${element}. Check console for details.`,
+            variant: "destructive",
+          });
+          // Consider this element as missing since we couldn't analyze it
           missingElements.push(element);
         }
       }
@@ -132,9 +144,8 @@ export const NotesValidator = () => {
     } catch (error) {
       console.error("Analysis error:", error);
       toast({
-        title: "Analysis Error",
-        description:
-          "An error occurred while analyzing notes. Using fallback method.",
+        title: "LLM API Error",
+        description: "Failed to connect to Groq API. Please check your API key and connection.",
         variant: "destructive",
       });
     } finally {

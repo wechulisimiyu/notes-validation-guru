@@ -1,128 +1,241 @@
-import { Groq } from "groq-sdk";
+import { pipeline, env } from '@huggingface/transformers';
 
-let groqClient: Groq | null = null;
-let modelLoadAttempted = false;
+// Enable WebGPU acceleration if available
+env.useBrowserCache = true;
+// env.useWebGpu = true;
 
-export const initializeGroqClient = async () => {
-  if (!groqClient && !modelLoadAttempted) {
-    try {
-      modelLoadAttempted = true;
-      const apiKey = process.env.GROQ_API_KEY || "";
-
-      if (!apiKey) {
-        console.warn("GROQ_API_KEY not found in environment variables");
-        return null;
-      }
-
-      groqClient = new Groq({ apiKey });
-      return groqClient;
-    } catch (error) {
-      console.error("Failed to initialize Groq client:", error);
-      return null;
-    }
-  }
-  return groqClient;
+// Track loading state of models
+const modelLoadingState = {
+  classificationModel: null,
+  qaModel: null,
+  isLoading: false,
 };
 
-const identifySoapSections = (notes: string): Record<string, string> => {
+// Context about what kind of information typically goes in each SOAP section
+const medicalContexts = {
+  "Chief complaint": {
+    description: "The patient's primary reason for seeking care, expressed in their own words",
+    examples: ["chest pain", "headache for 3 days", "shortness of breath"],
+    soapSection: "S",
+    keywords: ["presents with", "complains of", "reports", "chief complaint", "cc", "reason for visit"]
+  },
+  "History of present illness": {
+    description: "Chronological description of the development of the patient's illness",
+    examples: ["symptoms began 2 days ago", "worsens with activity", "improves with rest"],
+    soapSection: "S",
+    keywords: ["history", "started", "began", "onset", "duration", "course", "hpi"]
+  },
+  "Past medical history": {
+    description: "List of patient's significant past diseases, surgeries, and health conditions",
+    examples: ["diabetes diagnosed 5 years ago", "hypertension", "previous surgery"],
+    soapSection: "S",
+    keywords: ["pmh", "medical history", "chronic", "previous", "past", "diagnosed with", "surgery"]
+  },
+  "Current medications": {
+    description: "Medications the patient is currently taking including dosages",
+    examples: ["lisinopril 10mg daily", "metformin 500mg twice daily", "aspirin 81mg daily"],
+    soapSection: "S",
+    keywords: ["medications", "meds", "taking", "prescribed", "pills", "drug", "dose", "mg", "daily"]
+  },
+  "Allergies": {
+    description: "Substances that cause allergic reactions in the patient",
+    examples: ["penicillin - rash", "shellfish - anaphylaxis", "NKDA (no known drug allergies)"],
+    soapSection: "S",
+    keywords: ["allergic to", "allergy", "allergies", "NKDA", "sensitive to", "reaction"]
+  },
+  "Physical examination findings": {
+    description: "Results of the clinician's physical examination of the patient",
+    examples: ["lungs clear to auscultation", "abdomen soft, non-tender", "+2 edema in lower extremities"],
+    soapSection: "O",
+    keywords: ["exam", "examination", "physical", "found", "observed", "auscultation", "percussion", "palpation"]
+  },
+  "Vital signs": {
+    description: "Measurable physiological parameters",
+    examples: ["BP 120/80", "HR 72", "Temp 98.6F", "RR 16", "O2 sat 99%"],
+    soapSection: "O",
+    keywords: ["vitals", "BP", "blood pressure", "pulse", "temperature", "respirations", "heart rate", "temp", "spo2"]
+  },
+  "Lab results": {
+    description: "Results from laboratory tests",
+    examples: ["WBC 7.2", "Hgb 13.5", "Na 140", "K 4.2", "Glucose 95"],
+    soapSection: "O",
+    keywords: ["labs", "laboratory", "test", "results", "values", "studies", "wbc", "hgb", "cbc", "glucose"]
+  },
+  "Diagnosis": {
+    description: "The clinician's determination of the patient's disease or condition",
+    examples: ["Acute bronchitis", "Type 2 diabetes mellitus", "Major depressive disorder"],
+    soapSection: "A",
+    keywords: ["diagnosis", "impression", "assessment", "dx", "determined", "condition", "suspect"]
+  },
+  "Treatment plan": {
+    description: "Therapeutic interventions prescribed for the patient",
+    examples: ["Start amoxicillin 500mg TID for 10 days", "Increase metformin to 1000mg BID", "Schedule PT evaluation"],
+    soapSection: "P",
+    keywords: ["plan", "treatment", "prescribed", "therapy", "start", "begin", "counseled", "recommended"]
+  },
+  "Follow-up instructions": {
+    description: "Directions for subsequent care",
+    examples: ["Return in 2 weeks", "Call if symptoms worsen", "Schedule follow-up in 3 months"],
+    soapSection: "P",
+    keywords: ["follow-up", "return", "f/u", "check back", "appointment", "schedule", "call if"]
+  }
+};
+
+// Initialize models
+const initializeModels = async () => {
+  if (modelLoadingState.isLoading) {
+    return;
+  }
+
+  console.log("Initializing Hugging Face models...");
+  modelLoadingState.isLoading = true;
+
+  try {
+    // First model: Text classification for SOAP sections
+    if (!modelLoadingState.classificationModel) {
+      console.log("Loading classification model...");
+      // Using a smaller model suitable for WebGPU
+      modelLoadingState.classificationModel = await pipeline(
+        'text-classification',
+        'distilbert-base-uncased'
+      );
+      console.log("Classification model loaded successfully");
+    }
+
+    // Second model: Question-answering for medical elements
+    if (!modelLoadingState.qaModel) {
+      console.log("Loading QA model...");
+      // Using a smaller model suitable for WebGPU
+      modelLoadingState.qaModel = await pipeline(
+        'question-answering',
+        'distilbert-base-uncased-distilled-squad'
+      );
+      console.log("QA model loaded successfully");
+    }
+
+    modelLoadingState.isLoading = false;
+    return true;
+  } catch (error) {
+    console.error("Error loading models:", error);
+    modelLoadingState.isLoading = false;
+    return false;
+  }
+};
+
+// Function to identify SOAP sections using text analysis and keywords
+export const identifySoapSections = async (notes: string): Promise<Record<string, string>> => {
   const sections: Record<string, string> = {
     S: "",
     O: "",
     A: "",
-    P: "",
+    P: ""
   };
 
-  // Look for explicit section headers
-  const subjectivePatterns = [
-    /^subjective:?/im,
-    /^history:?/im,
-    /^hpi:?/im,
-    /^s:?/im,
-  ];
-  const objectivePatterns = [
-    /^objective:?/im,
-    /^physical exam:?/im,
-    /^findings:?/im,
-    /^o:?/im,
-  ];
-  const assessmentPatterns = [/^assessment:?/im, /^impression:?/im, /^a:?/im];
-  const planPatterns = [
-    /^plan:?/im,
-    /^treatment:?/im,
-    /^recommendations:?/im,
-    /^p:?/im,
-  ];
-
-  // Split the notes into lines to process section by section
-  const lines = notes.split('\n');
-  let currentSection: 'S' | 'O' | 'A' | 'P' | null = null;
+  // Split notes into paragraphs
+  const paragraphs = notes.split(/\n\s*\n/).filter(p => p.trim().length > 0);
   
-  for (const line of lines) {
-    // Determine if line is a section header
-    if (subjectivePatterns.some(pattern => pattern.test(line))) {
-      currentSection = 'S';
-      continue;
-    } else if (objectivePatterns.some(pattern => pattern.test(line))) {
-      currentSection = 'O';
-      continue;
-    } else if (assessmentPatterns.some(pattern => pattern.test(line))) {
-      currentSection = 'A';
-      continue;
-    } else if (planPatterns.some(pattern => pattern.test(line))) {
-      currentSection = 'P';
-      continue;
+  // If only one paragraph, split by lines instead
+  const chunks = paragraphs.length <= 1 
+    ? notes.split(/\n/).filter(l => l.trim().length > 0)
+    : paragraphs;
+
+  try {
+    // Try to load models
+    await initializeModels();
+
+    if (modelLoadingState.classificationModel) {
+      console.log("Using transformer model for SOAP classification");
+      
+      // Process each chunk to determine which section it belongs to
+      for (const chunk of chunks) {
+        if (chunk.length < 10) continue; // Skip very short chunks
+        
+        // Prepare prompts for each SOAP section
+        const prompts = [
+          `Is this text describing subjective information from the patient: "${chunk.substring(0, 200)}..."?`,
+          `Is this text describing objective clinical findings: "${chunk.substring(0, 200)}..."?`,
+          `Is this text an assessment or diagnosis: "${chunk.substring(0, 200)}..."?`,
+          `Is this text describing a treatment plan: "${chunk.substring(0, 200)}..."?`
+        ];
+        
+        // Get classification results
+        const results = await Promise.all(prompts.map(prompt => 
+          modelLoadingState.classificationModel(prompt)
+        ));
+        
+        // Find the highest confidence section
+        const confidences = [
+          results[0][0].score, // S confidence
+          results[1][0].score, // O confidence
+          results[2][0].score, // A confidence
+          results[3][0].score  // P confidence
+        ];
+        
+        const maxIndex = confidences.indexOf(Math.max(...confidences));
+        const sectionKeys = ["S", "O", "A", "P"];
+        const assignedSection = sectionKeys[maxIndex];
+        
+        // Add to appropriate section
+        sections[assignedSection] += chunk + "\n\n";
+      }
+    } else {
+      console.log("Using keyword-based SOAP classification (fallback)");
+      // Fallback to keyword-based classification
+      for (const chunk of chunks) {
+        // Count keywords for each section
+        let sCounts = 0, oCounts = 0, aCounts = 0, pCounts = 0;
+        const chunkLower = chunk.toLowerCase();
+        
+        // Check for subjective keywords
+        for (const element of Object.values(medicalContexts)) {
+          if (element.soapSection === "S") {
+            sCounts += element.keywords.filter(k => chunkLower.includes(k.toLowerCase())).length;
+          } else if (element.soapSection === "O") {
+            oCounts += element.keywords.filter(k => chunkLower.includes(k.toLowerCase())).length;
+          } else if (element.soapSection === "A") {
+            aCounts += element.keywords.filter(k => chunkLower.includes(k.toLowerCase())).length;
+          } else if (element.soapSection === "P") {
+            pCounts += element.keywords.filter(k => chunkLower.includes(k.toLowerCase())).length;
+          }
+        }
+        
+        // Assign to section with most keyword matches
+        const counts = [sCounts, oCounts, aCounts, pCounts];
+        const maxIndex = counts.indexOf(Math.max(...counts));
+        
+        if (counts[maxIndex] > 0) {
+          sections["SOAP"[maxIndex]] += chunk + "\n\n";
+        } else {
+          // If no keywords found, assign based on position in the document
+          const index = chunks.indexOf(chunk) / chunks.length;
+          if (index < 0.4) sections.S += chunk + "\n\n";
+          else if (index < 0.7) sections.O += chunk + "\n\n";
+          else if (index < 0.85) sections.A += chunk + "\n\n";
+          else sections.P += chunk + "\n\n";
+        }
+      }
     }
     
-    // Add content to the current section
-    if (currentSection) {
-      sections[currentSection] += line + '\n';
-    } else {
-      // If no section has been identified yet, default to Subjective
-      sections['S'] += line + '\n';
+    return sections;
+  } catch (error) {
+    console.error("Error in identifySoapSections:", error);
+    
+    // Fallback to positional inference
+    console.log("Using positional inference for SOAP sections");
+    const totalChunks = chunks.length;
+    
+    for (let i = 0; i < totalChunks; i++) {
+      if (i < totalChunks * 0.4) sections.S += chunks[i] + "\n\n";
+      else if (i < totalChunks * 0.7) sections.O += chunks[i] + "\n\n";
+      else if (i < totalChunks * 0.85) sections.A += chunks[i] + "\n\n";
+      else sections.P += chunks[i] + "\n\n";
     }
+    
+    return sections;
   }
-  
-  // If no explicit sections were found, attempt to infer sections
-  if (!sections.S && !sections.O && !sections.A && !sections.P) {
-    return inferSoapSections(notes);
-  }
-
-  return sections;
 };
 
-// Helper function to infer SOAP sections when no explicit headers are present
-const inferSoapSections = (notes: string): Record<string, string> => {
-  const sections: Record<string, string> = {
-    S: "",
-    O: "",
-    A: "",
-    P: "",
-  };
-  
-  const lines = notes.split('\n');
-  const totalLines = lines.length;
-  
-  // Simple heuristic: divide the note into approximately equal parts
-  // with more weight given to S and O sections
-  const sEndIndex = Math.floor(totalLines * 0.35);
-  const oEndIndex = Math.floor(totalLines * 0.7);
-  const aEndIndex = Math.floor(totalLines * 0.85);
-  
-  for (let i = 0; i < totalLines; i++) {
-    if (i < sEndIndex) {
-      sections.S += lines[i] + '\n';
-    } else if (i < oEndIndex) {
-      sections.O += lines[i] + '\n';
-    } else if (i < aEndIndex) {
-      sections.A += lines[i] + '\n';
-    } else {
-      sections.P += lines[i] + '\n';
-    }
-  }
-  
-  return sections;
-};
-
+// Function to analyze medical text for specific elements
 export const analyzeMedicalText = async (
   notes: string,
   requiredElement: string
@@ -131,314 +244,169 @@ export const analyzeMedicalText = async (
   matchedText: string | null;
   soapSection?: string;
 }> => {
+  console.log(`Analyzing for: ${requiredElement}`);
+  
+  // Get the expected SOAP section and context for this element
+  const context = medicalContexts[requiredElement as keyof typeof medicalContexts];
+  if (!context) {
+    console.error(`No context defined for element: ${requiredElement}`);
+    return { hasContent: false, matchedText: null };
+  }
+  
+  const expectedSoapSection = context.soapSection;
+  const keywords = context.keywords || [];
+  const examples = context.examples || [];
+  
   try {
     // First identify SOAP sections
-    const soapSections = identifySoapSections(notes);
+    console.log("Identifying SOAP sections...");
+    const soapSections = await identifySoapSections(notes);
     
-    // Then use the appropriate section for the required element
-    const relevantSection = medicalContexts[requiredElement as keyof typeof medicalContexts]?.soapSection;
+    // If we have identified SOAP sections, prioritize the appropriate section for this element
+    const relevantSection = expectedSoapSection || "";
     const sectionText = relevantSection ? soapSections[relevantSection] : "";
     
-    // Prioritize searching in the relevant section if available, otherwise use the full notes
-    const textToAnalyze = sectionText ? sectionText : notes;
+    // Prioritize the relevant section if available, otherwise check the whole note
+    const textToAnalyze = sectionText && sectionText.length > 0 ? sectionText : notes;
     
-    const client = await initializeGroqClient();
-    if (!client) {
-      return fallbackAnalysis(textToAnalyze, requiredElement, relevantSection);
-    }
-
-    const prompt = `
-    You are an AI assistant helping to analyze medical notes using the SOAP format.
-    Extract information related to "${requiredElement}" from the following clinical notes.
-    Consider that this element would typically appear in the ${
-      relevantSection || "unknown"
-    } section of SOAP notes.
-    If the information is present, respond with "YES: [extracted text]"
-    If the information is missing, respond with "NO"
+    // Try to use the QA model
+    await initializeModels();
     
-    Clinical notes:
-    ${textToAnalyze}
-  `;
-
-    const response = await client.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a specialized medical text analyzer. Answer with just YES or NO followed by the extracted content.",
-        },
-        { role: "user", content: prompt },
-      ],
-      max_tokens: 300,
-      temperature: 0.1,
-    });
-
-    const answer = response.choices[0]?.message?.content || "";
-
-    if (answer.startsWith("YES:")) {
-      const extractedText = answer.substring(4).trim();
-      return { 
-        hasContent: true, 
-        matchedText: extractedText,
-        soapSection: relevantSection
-      };
-    } else {
-      return { 
-        hasContent: false, 
-        matchedText: null,
-        soapSection: relevantSection 
-      };
-    }
-  } catch (error) {
-    console.error("Error using Groq API:", error);
-    return fallbackAnalysis(notes, requiredElement);
-  }
-};
-
-const fallbackAnalysis = (
-  notes: string,
-  requiredElement: string,
-  soapSection?: string
-): { hasContent: boolean; matchedText: string | null; soapSection?: string } => {
-  const hasMatch =
-    findContextualMatch(notes, requiredElement) ||
-    containsKeywords(notes, requiredElement);
-
-  if (hasMatch) {
-    const textSnippet = extractTextSnippet(notes, requiredElement);
-    return { hasContent: true, matchedText: textSnippet, soapSection };
-  }
-
-  return { hasContent: false, matchedText: null, soapSection };
-};
-
-const containsKeywords = (text: string, element: string): boolean => {
-  const keywords = element.toLowerCase().split(" ");
-  const textLower = text.toLowerCase();
-
-  const matchCount = keywords.filter((word) => textLower.includes(word)).length;
-  return matchCount >= Math.ceil(keywords.length / 2);
-};
-
-const medicalContexts = {
-  "Chief complaint": {
-    patterns: [
-      "presents with",
-      "complains of",
-      "came in for",
-      "reports",
-      "experiencing",
-      "CC:",
-    ],
-    contextClues: ["symptoms", "since", "started", "ago"],
-    soapSection: "S",
-  },
-  "History of present illness": {
-    patterns: ["started", "began", "developed", "progression", "course"],
-    contextClues: [
-      "days ago",
-      "weeks ago",
-      "gradually",
-      "suddenly",
-      "previously",
-    ],
-    soapSection: "S",
-  },
-  "Past medical history": {
-    patterns: ["history of", "diagnosed with", "previous", "chronic", "known"],
-    contextClues: ["condition", "surgery", "treatment", "managed with"],
-    soapSection: "S",
-  },
-  "Current medications": {
-    patterns: [
-      "taking",
-      "prescribed",
-      "medications include",
-      "daily",
-      "current medications",
-    ],
-    contextClues: ["mg", "dose", "tablet", "capsule"],
-    soapSection: "S",
-  },
-  "Allergies": {
-    patterns: ["allergic to", "allergies", "reactions", "sensitivity"],
-    contextClues: [
-      "medication allergy",
-      "food allergy",
-      "NKDA",
-      "NKFDA",
-      "intolerance",
-    ],
-    soapSection: "S",
-  },
-  "Physical examination findings": {
-    patterns: ["examination reveals", "observed", "auscultation", "palpation"],
-    contextClues: ["normal", "present", "absent", "bilateral"],
-    soapSection: "O",
-  },
-  "Vital signs": {
-    patterns: [
-      "vitals",
-      "vital signs",
-      "VS:",
-      "BP",
-      "HR",
-      "RR",
-      "T:",
-      "temp",
-      "temperature",
-      "pulse ox",
-    ],
-    contextClues: ["mmHg", "bpm", "°C", "°F", "%", "oxygen saturation"],
-    soapSection: "O",
-    regex:
-      /(?:BP|HR|RR|temp|temperature|pulse|respiration|SpO2|O2 sat)[:\s-]+\d+(?:[/.]?\d+)?(?:\s*(?:mmHg|bpm|%|°[CF]|C|F))?/gi,
-  },
-  "Lab results": {
-    patterns: ["lab", "laboratory", "results", "test", "value"],
-    contextClues: ["elevated", "normal", "abnormal", "within range", "high", "low"],
-    soapSection: "O",
-  },
-  "Diagnosis": {
-    patterns: [
-      "assessment:",
-      "impression:",
-      "diagnosis:",
-      "diagnoses:",
-      "A:",
-      "dx:",
-      "assessment and plan:",
-    ],
-    contextClues: [
-      "likely",
-      "consistent with",
-      "rule out",
-      "differential",
-      "probable",
-    ],
-    soapSection: "A",
-  },
-  "Treatment plan": {
-    patterns: [
-      "plan:",
-      "P:",
-      "will",
-      "prescribe",
-      "recommended",
-      "advised",
-      "treatment:",
-    ],
-    contextClues: [
-      "follow up",
-      "refer",
-      "mg",
-      "daily",
-      "continue",
-      "start",
-      "stop",
-    ],
-    soapSection: "P",
-  },
-  "Follow-up instructions": {
-    patterns: [
-      "follow up",
-      "return",
-      "schedule",
-      "appointment",
-      "check back",
-    ],
-    contextClues: [
-      "weeks",
-      "days",
-      "months",
-      "if symptoms",
-      "as needed",
-    ],
-    soapSection: "P",
-  },
-};
-
-const findContextualMatch = (text: string, section: string): boolean => {
-  const context = medicalContexts[section as keyof typeof medicalContexts];
-  if (!context) return false;
-
-  const textLower = text.toLowerCase();
-
-  const hasPattern = context.patterns.some((pattern) =>
-    textLower.includes(pattern.toLowerCase())
-  );
-
-  const hasContextClues = context.contextClues.some((clue) =>
-    textLower.includes(clue.toLowerCase())
-  );
-
-  if (section === "Vital signs") {
-    const hasNumericValues =
-      /\d+/.test(textLower) &&
-      (textLower.includes("bp") ||
-        textLower.includes("hr") ||
-        textLower.includes("temp") ||
-        textLower.includes("rr"));
-    return hasNumericValues || (hasPattern && hasContextClues);
-  }
-
-  return hasPattern || (hasContextClues && textLower.length > 50);
-};
-
-const extractTextSnippet = (notes: string, requiredElement: string): string => {
-  const context =
-    medicalContexts[requiredElement as keyof typeof medicalContexts];
-  if (!context) return "Content detected (no specific text extracted)";
-
-  const sentences = notes.split(/[.!?]+/).filter((s) => s.trim().length > 0);
-  const textLower = notes.toLowerCase();
-
-  const relevantSentences: string[] = [];
-
-  for (const sentence of sentences) {
-    const sentenceLower = sentence.toLowerCase();
-
-    const hasPattern = context.patterns.some((pattern) =>
-      sentenceLower.includes(pattern.toLowerCase())
-    );
-
-    const hasClue = context.contextClues.some((clue) =>
-      sentenceLower.includes(clue.toLowerCase())
-    );
-
-    if (hasPattern || hasClue) {
-      relevantSentences.push(sentence.trim());
-    }
-  }
-
-  if (requiredElement === "Vital signs") {
-    const vitalSignRegex =
-      /(?:BP|HR|RR|temp|temperature|pulse|respiration|SpO2|O2 sat)[:\s-]+\d+(?:[/.]?\d+)?(?:\s*(?:mmHg|bpm|%|°[CF]|C|F))?/gi;
-    const vitalMatches = notes.match(vitalSignRegex) || [];
-
-    if (vitalMatches.length > 0) {
-      return vitalMatches.join("; ");
-    }
-  }
-
-  if (relevantSentences.length > 0) {
-    if (relevantSentences.length > 3) {
-      return relevantSentences.slice(0, 3).join(". ") + "...";
-    }
-    return relevantSentences.join(". ");
-  }
-
-  const keywords = requiredElement.toLowerCase().split(" ");
-
-  for (const sentence of sentences) {
-    const sentenceLower = sentence.toLowerCase();
-    for (const keyword of keywords) {
-      if (sentenceLower.includes(keyword) && sentence.length < 200) {
-        return sentence.trim();
+    if (modelLoadingState.qaModel) {
+      console.log("Using QA model for element detection");
+      
+      // Create questions based on the element type
+      const questions = [
+        `What is the ${requiredElement.toLowerCase()}?`,
+        `Does the note mention ${requiredElement.toLowerCase()}?`,
+        `Where in the note does it discuss ${requiredElement.toLowerCase()}?`
+      ];
+      
+      // Add example-based questions
+      if (examples.length > 0) {
+        questions.push(`Is there anything like "${examples[0]}" in the note?`);
+      }
+      
+      // Try each question until we find an answer
+      for (const question of questions) {
+        try {
+          const result = await modelLoadingState.qaModel({
+            question,
+            context: textToAnalyze.substring(0, 2000) // Limit context length
+          });
+          
+          // Check if we got a meaningful answer (score threshold and minimum length)
+          if (result.score > 0.1 && result.answer.length > 3) {
+            return {
+              hasContent: true,
+              matchedText: result.answer,
+              soapSection: expectedSoapSection
+            };
+          }
+        } catch (e) {
+          console.warn(`QA model error with question "${question}":`, e);
+          // Continue with next question
+        }
       }
     }
+    
+    // Fallback to keyword-based approach
+    console.log("Using keyword-based approach for element detection");
+    
+    // Check for keywords
+    const textLower = textToAnalyze.toLowerCase();
+    for (const keyword of [...keywords, requiredElement.toLowerCase()]) {
+      const index = textLower.indexOf(keyword.toLowerCase());
+      if (index >= 0) {
+        // Extract surrounding context
+        const start = Math.max(0, index - 50);
+        const end = Math.min(textToAnalyze.length, index + keyword.length + 150);
+        const extractedText = textToAnalyze.substring(start, end);
+        
+        return {
+          hasContent: true,
+          matchedText: extractedText,
+          soapSection: expectedSoapSection
+        };
+      }
+    }
+    
+    // Check for examples (as exact phrases might not be found)
+    for (const example of examples) {
+      // Try to find conceptually similar content by looking for parts of the example
+      const parts = example.split(' ');
+      for (const part of parts) {
+        if (part.length > 3) { // Only check meaningful parts
+          const index = textLower.indexOf(part.toLowerCase());
+          if (index >= 0) {
+            // Extract surrounding context
+            const start = Math.max(0, index - 50);
+            const end = Math.min(textToAnalyze.length, index + part.length + 150);
+            const extractedText = textToAnalyze.substring(start, end);
+            
+            return {
+              hasContent: true,
+              matchedText: extractedText,
+              soapSection: expectedSoapSection
+            };
+          }
+        }
+      }
+    }
+    
+    // Special case handling for certain elements
+    if (requiredElement === "Vital signs") {
+      const vitalPatterns = [
+        /BP\s*[:=]?\s*\d+\s*\/\s*\d+/i,
+        /temp\w*\s*[:=]?\s*\d+\.?\d*/i,
+        /HR\s*[:=]?\s*\d+/i,
+        /pulse\s*[:=]?\s*\d+/i,
+        /RR\s*[:=]?\s*\d+/i,
+        /SPO2\s*[:=]?\s*\d+/i,
+        /O2 sat\w*\s*[:=]?\s*\d+/i,
+      ];
+      
+      for (const pattern of vitalPatterns) {
+        const match = textToAnalyze.match(pattern);
+        if (match) {
+          // Find the paragraph containing this match
+          const paragraphs = textToAnalyze.split('\n');
+          const matchingParagraph = paragraphs.find(p => p.match(pattern));
+          
+          return {
+            hasContent: true,
+            matchedText: matchingParagraph || match[0],
+            soapSection: expectedSoapSection
+          };
+        }
+      }
+    }
+    
+    // No matching content found
+    return {
+      hasContent: false,
+      matchedText: null,
+      soapSection: expectedSoapSection
+    };
+  } catch (error) {
+    console.error("Error analyzing medical text:", error);
+    
+    // Attempt basic keyword matching as last resort
+    const textLower = notes.toLowerCase();
+    for (const keyword of [...keywords, requiredElement.toLowerCase()]) {
+      if (textLower.includes(keyword.toLowerCase())) {
+        return {
+          hasContent: true,
+          matchedText: `Contains "${keyword}" (exact location not determined)`,
+          soapSection: expectedSoapSection
+        };
+      }
+    }
+    
+    return {
+      hasContent: false,
+      matchedText: null,
+      soapSection: expectedSoapSection
+    };
   }
-
-  return "Content detected (no specific text extracted)";
 };
